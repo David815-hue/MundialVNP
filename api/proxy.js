@@ -1,112 +1,139 @@
 /**
- * Vercel EDGE Function – runs on V8 (like Cloudflare Workers),
- * NOT on Node.js.  This avoids the header-stripping issue that
- * caused the IPTV server to return 411 "Length Required".
+ * Vercel Edge Function – HLS Stream Proxy
+ * 
+ * Uses query-parameter approach (like Cloudflare HLS-Proxy-Worker)
+ * instead of path-based routing to avoid URL length/routing issues.
+ * 
+ * Usage:
+ *   /api/proxy?t=BASE64(targetUrl)          → proxy any URL
+ *   /api/proxy?action=...&username=...      → IPTV API proxy
  */
 export const config = { runtime: 'edge' };
 
+/* ── helpers ─────────────────────────────────────────────────── */
+function cors(extra = {}) {
+    return {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET,OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        ...extra,
+    };
+}
+
+function jsonResp(obj, status = 200) {
+    return new Response(JSON.stringify(obj), {
+        status,
+        headers: cors({ 'Content-Type': 'application/json' }),
+    });
+}
+
+function encodeTarget(url) {
+    // URL-safe base64
+    return btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function decodeTarget(encoded) {
+    // Reverse URL-safe base64
+    let s = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    return atob(s);
+}
+
 /* ── rewrite m3u8 playlist URLs ─────────────────────────────── */
-function rewriteM3u8(text, encodedServer) {
-    const prefix = `/api/proxy/s/${encodedServer}`;
+function rewriteM3u8(text, serverOrigin) {
     return text.split('\n').map(line => {
         const t = line.trim();
         if (!t || t.startsWith('#')) return line;
+
+        let fullUrl;
         if (t.startsWith('http://') || t.startsWith('https://')) {
-            try {
-                const u = new URL(t);
-                const enc = btoa(u.origin).replace(/=+$/, '');
-                return `/api/proxy/s/${enc}${u.pathname}${u.search}`;
-            } catch (_) { return line; }
+            fullUrl = t;
+        } else if (t.startsWith('/')) {
+            fullUrl = serverOrigin + t;
+        } else {
+            // Relative path – can't resolve without base, skip
+            return line;
         }
-        if (t.startsWith('/')) return `${prefix}${t}`;
-        return line;
+
+        return `/api/proxy?t=${encodeTarget(fullUrl)}`;
     }).join('\n');
 }
 
-/* ── headers we send to the IPTV server ─────────────────────── */
-const UPSTREAM_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Accept': '*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Connection': 'keep-alive',
-};
+/* ── upstream fetch headers ──────────────────────────────────── */
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 /* ── main handler ───────────────────────────────────────────── */
 export default async function handler(request) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-
-    // ── CORS preflight ──────────────────────────────────────
     if (request.method === 'OPTIONS') {
-        return new Response(null, {
-            status: 200,
-            headers: {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET,OPTIONS',
-                'Access-Control-Allow-Headers': '*',
-            },
-        });
+        return new Response(null, { status: 200, headers: cors() });
     }
 
-    // ── STREAM PROXY: /api/proxy/s/<BASE64>/<remotePath> ────
-    const m = path.match(/^\/api\/proxy\/s\/([^\/]+)\/(.+)/);
+    const url = new URL(request.url);
 
-    if (m) {
-        const [, enc, remotePath] = m;
-        let server;
-        try { server = atob(enc); }
-        catch (_) {
-            return json({ error: 'Bad server encoding' }, 400);
+    // ── STREAM/SEGMENT PROXY: ?t=BASE64_URL ─────────────────
+    const t = url.searchParams.get('t');
+    if (t) {
+        let targetUrl;
+        try {
+            targetUrl = decodeTarget(t);
+        } catch (_) {
+            return jsonResp({ error: 'Bad target encoding' }, 400);
         }
 
-        // Build target URL  (include query string if any)
-        const qs = url.search || '';
-        const targetUrl = `${server}/${remotePath}${qs}`;
+        let targetOrigin;
+        try {
+            const u = new URL(targetUrl);
+            targetOrigin = u.origin;
+        } catch (_) {
+            return jsonResp({ error: 'Invalid target URL' }, 400);
+        }
 
         try {
             const resp = await fetch(targetUrl, {
                 method: 'GET',
-                headers: UPSTREAM_HEADERS,
+                headers: {
+                    'User-Agent': UA,
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': targetOrigin + '/',
+                    'Origin': targetOrigin,
+                },
                 redirect: 'follow',
             });
 
             if (!resp.ok) {
-                return new Response(`Upstream ${resp.status}`, {
-                    status: resp.status,
-                    headers: cors(),
-                });
+                // Return diagnostic info
+                return new Response(
+                    `Upstream error: ${resp.status} ${resp.statusText}\nTarget: ${targetUrl}`,
+                    { status: resp.status, headers: cors() }
+                );
             }
 
             const ct = resp.headers.get('content-type') || '';
-            const isPlaylist = remotePath.endsWith('.m3u8') ||
+            const isPlaylist = targetUrl.endsWith('.m3u8') ||
                                ct.includes('mpegurl');
 
             if (isPlaylist) {
                 const text = await resp.text();
-                return new Response(rewriteM3u8(text, enc), {
+                return new Response(rewriteM3u8(text, targetOrigin), {
                     status: 200,
-                    headers: {
-                        ...cors(),
-                        'Content-Type': ct || 'application/vnd.apple.mpegurl',
-                    },
+                    headers: cors({ 'Content-Type': 'application/vnd.apple.mpegurl' }),
                 });
             }
 
-            // Binary segment (.ts) – stream it through
+            // Binary (.ts segment, image, etc.) – stream through
             return new Response(resp.body, {
                 status: 200,
-                headers: {
-                    ...cors(),
-                    'Content-Type': ct || 'video/mp2t',
-                },
+                headers: cors({
+                    'Content-Type': ct || 'application/octet-stream',
+                }),
             });
-
         } catch (err) {
-            return json({ error: err.message }, 502);
+            return jsonResp({ error: err.message, target: targetUrl }, 502);
         }
     }
 
-    // ── IPTV API PROXY (player_api.php) ─────────────────────
+    // ── IPTV API PROXY (?action=...&username=...) ───────────
     const action      = url.searchParams.get('action');
     const username    = url.searchParams.get('username') || '';
     const password    = url.searchParams.get('password') || '';
@@ -123,30 +150,17 @@ export default async function handler(request) {
 
     try {
         const resp = await fetch(target, {
-            headers: UPSTREAM_HEADERS,
+            headers: {
+                'User-Agent': UA,
+                'Accept': 'application/json',
+                'Referer': baseUrl + '/',
+                'Origin': baseUrl,
+            },
             redirect: 'follow',
         });
-        if (!resp.ok) return json({ error: `HTTP ${resp.status}` }, resp.status);
-        const data = await resp.json();
-        return json(data, 200);
+        if (!resp.ok) return jsonResp({ error: `HTTP ${resp.status}` }, resp.status);
+        return jsonResp(await resp.json());
     } catch (e) {
-        return json({ error: e.message }, 500);
+        return jsonResp({ error: e.message }, 500);
     }
-}
-
-/* ── helpers ─────────────────────────────────────────────────── */
-function cors() {
-    return {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET,OPTIONS',
-    };
-}
-function json(obj, status = 200) {
-    return new Response(JSON.stringify(obj), {
-        status,
-        headers: {
-            ...cors(),
-            'Content-Type': 'application/json',
-        },
-    });
 }

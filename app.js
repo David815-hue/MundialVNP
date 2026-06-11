@@ -376,9 +376,10 @@
             // Direct to IPTV server
             streamUrl = `${creds.server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
         } else {
-            // Route through generic server proxy so /hlsr/ segments also resolve correctly
-            const base64Server = btoa(creds.server).replace(/=+$/, '');
-            streamUrl = `/api/proxy/s/${base64Server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
+            // Encode full stream URL as base64 and pass via query param
+            const fullStreamUrl = `${creds.server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
+            const b64 = btoa(fullStreamUrl).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            streamUrl = `/api/proxy?t=${b64}`;
         }
 
         // Hide placeholder and show info
