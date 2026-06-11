@@ -97,6 +97,7 @@ export default async function handler(request) {
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Referer': targetOrigin + '/',
                     'Origin': targetOrigin,
+                    'Content-Length': '0',
                 },
                 redirect: 'follow',
             });
@@ -155,6 +156,7 @@ export default async function handler(request) {
                 'Accept': 'application/json',
                 'Referer': baseUrl + '/',
                 'Origin': baseUrl,
+                'Content-Length': '0',
             },
             redirect: 'follow',
         });
