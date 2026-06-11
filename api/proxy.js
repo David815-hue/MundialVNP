@@ -71,7 +71,15 @@ export default async function handler(req, res) {
             const ctrl = new AbortController();
             const tid = setTimeout(() => ctrl.abort(), 15_000);
 
-            const upstream = await fetch(targetUrl, { signal: ctrl.signal });
+            const upstream = await fetch(targetUrl, {
+                signal: ctrl.signal,
+                method: 'GET',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'Accept': '*/*',
+                    'Content-Length': '0',
+                },
+            });
             clearTimeout(tid);
 
             if (!upstream.ok) {
@@ -121,7 +129,14 @@ export default async function handler(req, res) {
         const ctrl = new AbortController();
         const tid = setTimeout(() => ctrl.abort(), 12_000);
 
-        const upstream = await fetch(targetUrl, { signal: ctrl.signal });
+        const upstream = await fetch(targetUrl, {
+            signal: ctrl.signal,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Content-Length': '0',
+            },
+        });
         clearTimeout(tid);
 
         if (!upstream.ok) {
