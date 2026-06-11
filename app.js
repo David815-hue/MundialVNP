@@ -167,7 +167,8 @@
     const logHlsError = (data, channelName) => {
         const response = data.response || {};
         const context = data.context || {};
-        const urlInfo = describeHlsUrl(context.url || response.url || data.url || '');
+        const frag = data.frag || context.frag || {};
+        const urlInfo = describeHlsUrl(context.url || response.url || data.url || frag.url || '');
         const payload = {
             channel: channelName,
             type: data.type,
@@ -179,7 +180,7 @@
             targetUrl: urlInfo.targetUrl,
             loader: context.type || null,
             level: context.level ?? null,
-            fragment: context.frag?.sn ?? null,
+            fragment: frag.sn ?? null,
             networkDetails: data.networkDetails ? {
                 status: data.networkDetails.status,
                 statusText: data.networkDetails.statusText,

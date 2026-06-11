@@ -43,6 +43,8 @@ function rewriteM3u8(text, playlistUrl) {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const MAX_REDIRECTS = 5;
+const PLAYLIST_RETRIES = 3;
+const UPSTREAM_TIMEOUT_MS = 25000;
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -89,6 +91,53 @@ function requestTarget(targetUrl, redirectsLeft, onResponse, onError) {
     targetReq.end();
 }
 
+async function fetchUpstream(targetUrl, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const parsedUrl = new URL(targetUrl);
+        const response = await fetch(parsedUrl.toString(), {
+            method: 'GET',
+            headers: {
+                'User-Agent': UA,
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': parsedUrl.origin + '/',
+                'Origin': parsedUrl.origin,
+            },
+            redirect: 'follow',
+            signal: controller.signal,
+        });
+
+        return response;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function fetchPlaylistWithRetry(targetUrl) {
+    let lastResult = null;
+
+    for (let attempt = 1; attempt <= PLAYLIST_RETRIES; attempt += 1) {
+        const response = await fetchUpstream(targetUrl);
+        const text = await response.text();
+        lastResult = {
+            attempt,
+            status: response.status,
+            finalUrl: response.url || targetUrl,
+            text,
+            contentType: response.headers.get('content-type') || '',
+        };
+
+        if (response.ok && text.trimStart().startsWith('#EXTM3U')) {
+            return lastResult;
+        }
+    }
+
+    return lastResult;
+}
+
 export default function handler(req, res) {
     // Handle OPTIONS request for CORS preflight
     if (req.method === 'OPTIONS') {
@@ -122,6 +171,38 @@ export default function handler(req, res) {
             return;
         }
 
+        const initialPath = new URL(targetUrl).pathname.toLowerCase();
+        if (initialPath.endsWith('.m3u8')) {
+            fetchPlaylistWithRetry(targetUrl).then((playlistResult) => {
+                if (!playlistResult || !playlistResult.text.trimStart().startsWith('#EXTM3U')) {
+                    res.writeHead(502, { ...corsHeaders, 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        error: 'Invalid or empty playlist from upstream',
+                        target: targetUrl,
+                        finalUrl: playlistResult?.finalUrl || null,
+                        upstreamStatus: playlistResult?.status || null,
+                        upstreamContentType: playlistResult?.contentType || null,
+                        upstreamLength: playlistResult?.text.length || 0,
+                        attempts: playlistResult?.attempt || PLAYLIST_RETRIES,
+                        preview: playlistResult?.text.slice(0, 120) || '',
+                    }));
+                    return;
+                }
+
+                const rewritten = rewriteM3u8(playlistResult.text, playlistResult.finalUrl);
+                res.writeHead(200, {
+                    ...corsHeaders,
+                    'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Cache-Control': 'no-store',
+                });
+                res.end(rewritten);
+            }).catch((err) => {
+                res.writeHead(502, { ...corsHeaders, 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: err.message, target: targetUrl }));
+            });
+            return;
+        }
+
         requestTarget(targetUrl, MAX_REDIRECTS, (targetRes, finalUrl) => {
             const status = targetRes.statusCode || 200;
             const ct = targetRes.headers['content-type'] || '';
@@ -139,6 +220,20 @@ export default function handler(req, res) {
                     data += chunk;
                 });
                 targetRes.on('end', () => {
+                    if (!data.trimStart().startsWith('#EXTM3U')) {
+                        res.writeHead(502, { ...corsHeaders, 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            error: 'Invalid or empty playlist from upstream',
+                            target: targetUrl,
+                            finalUrl,
+                            upstreamStatus: status,
+                            upstreamContentType: ct,
+                            upstreamLength: data.length,
+                            preview: data.slice(0, 120),
+                        }));
+                        return;
+                    }
+
                     const rewritten = rewriteM3u8(data, finalUrl);
                     res.writeHead(200, {
                         ...corsHeaders,
