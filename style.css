@@ -105,16 +105,11 @@ body {
     gap: 12px;
 }
 
-.soccer-ball-logo {
-    width: 32px;
-    height: 32px;
-    color: var(--gold-trophy);
+.app-logo {
+    height: 42px;
+    width: auto;
+    object-fit: contain;
     filter: drop-shadow(0 0 8px var(--gold-glow));
-    animation: ball-rotate 20s linear infinite;
-}
-
-@keyframes ball-rotate {
-    100% { transform: rotate(360deg); }
 }
 
 .brand-text h1 {
@@ -802,9 +797,8 @@ body {
         font-size: 1.15rem;
     }
     
-    .soccer-ball-logo {
-        width: 26px;
-        height: 26px;
+    .app-logo {
+        height: 32px;
     }
     
     .header-search {
