@@ -1,140 +1,136 @@
-function rewriteM3u8(content, encodedServer, username, password) {
+/**
+ * Rewrites URLs inside an m3u8 playlist so that all segment/sub-playlist
+ * URLs are routed through our Vercel proxy instead of hitting the IPTV
+ * server directly (which would be blocked by Mixed Content policy).
+ */
+function rewriteM3u8(content, encodedServer) {
     const lines = content.split('\n');
-    const base64Prefix = `/api/proxy/live/${encodedServer}/${username}/${password}`;
-    
+    const proxyPrefix = `/api/proxy/s/${encodedServer}`;
+
     const rewrittenLines = lines.map(line => {
         const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) {
-            return line;
-        }
-        
-        // If it's an absolute URL
+
+        // Skip empty lines and HLS tags
+        if (!trimmed || trimmed.startsWith('#')) return line;
+
+        // Absolute URL → encode that specific origin
         if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
             try {
                 const url = new URL(trimmed);
-                const host = url.origin;
-                const path = url.pathname + url.search;
-                const newEncodedServer = Buffer.from(host).toString('base64').replace(/=+$/, '');
-                return `/api/proxy/live/${newEncodedServer}/${username}/${password}${path}`;
-            } catch (e) {
+                const enc = Buffer.from(url.origin).toString('base64').replace(/=+$/, '');
+                return `/api/proxy/s/${enc}${url.pathname}${url.search}`;
+            } catch (_) {
                 return line;
             }
         }
-        
-        // If it's a root-relative path (starts with /)
+
+        // Root-relative path (e.g. /hlsr/…) → prepend proxy prefix
         if (trimmed.startsWith('/')) {
-            return `${base64Prefix}${trimmed}`;
+            return `${proxyPrefix}${trimmed}`;
         }
-        
-        // If it's a relative path, let the browser resolve it naturally
+
+        // Relative path → keep as-is; the browser will resolve it
+        // relative to the current proxy URL which already has the right base
         return line;
     });
-    
+
     return rewrittenLines.join('\n');
 }
 
 export default async function handler(req, res) {
-    // Enable CORS for Vercel
+    // ── CORS headers ───────────────────────────────────────────────
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers',
+        'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, ' +
+        'Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
-    if (req.method === 'OPTIONS') {
-        res.status(200).end();
-        return;
-    }
+    if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
-    // Check if it's a stream proxy request (e.g. /api/proxy/live/BASE64_SERVER/username/password/stream_path)
     const urlPath = req.url || '';
-    const match = urlPath.match(/\/api\/proxy\/live\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.+)/);
-    
-    if (match) {
-        const [_, encodedServer, username, password, filename] = match;
+
+    // ── GENERIC STREAM PROXY ───────────────────────────────────────
+    // Pattern: /api/proxy/s/<BASE64_SERVER>/<any path on remote server>
+    const streamMatch = urlPath.match(/\/api\/proxy\/s\/([^\/]+)\/(.+)/);
+
+    if (streamMatch) {
+        const [, encodedServer, remotePath] = streamMatch;
         let server;
         try {
+            // Support base64 with or without trailing '='
             server = Buffer.from(encodedServer, 'base64').toString('utf-8');
-        } catch (e) {
+        } catch (_) {
             res.status(400).json({ error: 'Invalid server encoding' });
             return;
         }
 
-        const targetUrl = `${server}/live/${username}/${password}/${filename}`;
+        const targetUrl = `${server}/${remotePath}`;
 
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
+            const ctrl = new AbortController();
+            const tid = setTimeout(() => ctrl.abort(), 15_000);
 
-            const response = await fetch(targetUrl, { signal: controller.signal });
-            clearTimeout(timeoutId);
+            const upstream = await fetch(targetUrl, { signal: ctrl.signal });
+            clearTimeout(tid);
 
-            if (!response.ok) {
-                res.status(response.status).end();
+            if (!upstream.ok) {
+                res.status(upstream.status).end();
                 return;
             }
 
-            const contentType = response.headers.get('content-type') || '';
-            res.setHeader('Content-Type', contentType || 'application/octet-stream');
+            const ct = upstream.headers.get('content-type') || '';
+            res.setHeader('Content-Type', ct || 'application/octet-stream');
 
-            const isPlaylist = filename.endsWith('.m3u8') || 
-                               contentType.includes('mpegurl') || 
-                               contentType.includes('x-mpegurl');
+            const isPlaylist =
+                remotePath.endsWith('.m3u8') ||
+                ct.includes('mpegurl') ||
+                ct.includes('x-mpegurl');
 
             if (isPlaylist) {
-                // Read as text, rewrite URLs inside playlist to go through proxy
-                const playlistText = await response.text();
-                const rewritten = rewriteM3u8(playlistText, encodedServer, username, password);
-                res.status(200).send(rewritten);
+                const text = await upstream.text();
+                res.status(200).send(rewriteM3u8(text, encodedServer));
             } else {
-                // Pipe binary data (e.g. TS segments)
-                const contentLength = response.headers.get('content-length');
-                if (contentLength) {
-                    res.setHeader('Content-Length', contentLength);
-                }
-                const bodyBuffer = await response.arrayBuffer();
-                res.status(200).send(Buffer.from(bodyBuffer));
+                const cl = upstream.headers.get('content-length');
+                if (cl) res.setHeader('Content-Length', cl);
+                const buf = await upstream.arrayBuffer();
+                res.status(200).send(Buffer.from(buf));
             }
         } catch (err) {
-            if (err.name === 'AbortError') {
-                res.status(504).json({ error: 'Stream fetch timed out' });
-            } else {
-                res.status(500).json({ error: err.message || 'Stream fetch error' });
-            }
+            res.status(err.name === 'AbortError' ? 504 : 500)
+               .json({ error: err.message || 'Stream proxy error' });
         }
         return;
     }
 
-    // Existing API proxy logic for player_api.php
+    // ── IPTV API PROXY (player_api.php) ────────────────────────────
     const { action, username, password, category_id, stream_id, server } = req.query;
 
-    const defaultServerUrl = 'http://moontools.me:8080';
-    const serverUrl = (server ? decodeURIComponent(server) : defaultServerUrl).replace(/\/+$/, '');
+    const defaultServer = 'http://moontools.me:8080';
+    const serverUrl = (server ? decodeURIComponent(server) : defaultServer).replace(/\/+$/, '');
 
-    let targetUrl = `${serverUrl}/player_api.php?username=${encodeURIComponent(username || '')}&password=${encodeURIComponent(password || '')}`;
-    
-    if (action) targetUrl += `&action=${encodeURIComponent(action)}`;
+    let targetUrl =
+        `${serverUrl}/player_api.php` +
+        `?username=${encodeURIComponent(username || '')}` +
+        `&password=${encodeURIComponent(password || '')}`;
+    if (action)      targetUrl += `&action=${encodeURIComponent(action)}`;
     if (category_id) targetUrl += `&category_id=${encodeURIComponent(category_id)}`;
-    if (stream_id) targetUrl += `&stream_id=${encodeURIComponent(stream_id)}`;
+    if (stream_id)   targetUrl += `&stream_id=${encodeURIComponent(stream_id)}`;
 
     try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        const ctrl = new AbortController();
+        const tid = setTimeout(() => ctrl.abort(), 12_000);
 
-        const response = await fetch(targetUrl, { signal: controller.signal });
-        clearTimeout(timeoutId);
+        const upstream = await fetch(targetUrl, { signal: ctrl.signal });
+        clearTimeout(tid);
 
-        if (!response.ok) {
-            res.status(response.status).json({ error: `Server returned HTTP ${response.status}` });
+        if (!upstream.ok) {
+            res.status(upstream.status).json({ error: `HTTP ${upstream.status}` });
             return;
         }
-
-        const data = await response.json();
-        res.status(200).json(data);
+        res.status(200).json(await upstream.json());
     } catch (e) {
-        if (e.name === 'AbortError') {
-            res.status(504).json({ error: 'Gateway Timeout: IPTV server took too long to respond.' });
-        } else {
-            res.status(500).json({ error: e.message || 'Internal Server Error' });
-        }
+        res.status(e.name === 'AbortError' ? 504 : 500)
+           .json({ error: e.message || 'Internal Server Error' });
     }
 }

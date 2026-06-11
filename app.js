@@ -373,12 +373,12 @@
 
         let streamUrl;
         if (isLocal) {
-            // Stream format: http://domain:port/live/username/password/stream_id.m3u8
+            // Direct to IPTV server
             streamUrl = `${creds.server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
         } else {
-            // Encode server to base64 to pass it safely in the path structure so that relative .ts chunks resolve through the proxy too
+            // Route through generic server proxy so /hlsr/ segments also resolve correctly
             const base64Server = btoa(creds.server).replace(/=+$/, '');
-            streamUrl = `/api/proxy/live/${base64Server}/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
+            streamUrl = `/api/proxy/s/${base64Server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
         }
 
         // Hide placeholder and show info
