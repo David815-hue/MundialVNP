@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CineRide Live TV - Mundial 2026 Edition</title>
+    
+    <!-- Google Fonts: Outfit (headings) & Inter (body) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800;900&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="style.css">
+    
+    <!-- Hls.js library for streaming playback in browser -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+    <!-- Floating Exit Cinema Button -->
+    <button id="cinema-close-floating" class="cinema-close-floating" title="Salir del Modo Cine">
+        &times; Salir del Modo Cine
+    </button>
+
+    <!-- World Cup Stadium Background Overlay -->
+    <div class="mundial-bg-overlay"></div>
+
+    <header class="app-header">
+        <div class="header-container">
+            <div class="header-brand">
+                <svg class="soccer-ball-logo" viewBox="0 0 24 24" fill="currentColor">
+                    <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/>
+                    <path d="M12 2a10 10 0 0 0-4 1.5L10 7l4 0 2-3.5A10 10 0 0 0 12 2zM3.5 8a10 10 0 0 0 0 8L7.5 14l1.5-3.5-5.5-2.5zM20.5 8L15 10.5l1.5 3.5 4 2a10 10 0 0 0 0-8zM6 18.5a10 10 0 0 0 12 0l-2-3.5-8 0-2 3.5z"/>
+                </svg>
+                <div class="brand-text">
+                    <h1>CineRide</h1>
+                    <span class="badge-mundial">MUNDIAL 2026</span>
+                </div>
+            </div>
+            
+            <div class="header-search">
+                <div class="search-box">
+                    <input type="text" id="search-input" placeholder="Buscar canales de TV en vivo..." autocomplete="off">
+                    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </div>
+            </div>
+
+            <div class="header-actions">
+                <button id="server-settings-btn" class="btn-icon-label" title="Ajustes de Servidor">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.2a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                    <span>Servidor</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="app-layout">
+        <!-- Sidebar: Categories List -->
+        <aside class="sidebar-panel">
+            <div class="sidebar-header">
+                <h2>Categorías</h2>
+                <span id="category-count" class="count-badge">Cargando...</span>
+            </div>
+            <div id="category-list" class="category-list-scroll hide-scrollbar">
+                <!-- Loaded dynamically -->
+                <div class="sidebar-skeleton"></div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <section class="main-content">
+            <!-- Video Player Widget -->
+            <div class="player-container card-gold-glow">
+                <div class="video-wrapper">
+                    <video id="video-player" controls autoplay playsinline></video>
+                    <div id="player-placeholder" class="player-placeholder">
+                        <div class="placeholder-content">
+                            <svg class="placeholder-iconPulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <rect x="2" y="7" width="20" height="15" rx="2" ry="2"></rect>
+                                <polyline points="17 2 12 7 7 2"></polyline>
+                                <polygon points="10 11 15 14 10 17 10 11"></polygon>
+                            </svg>
+                            <h3>CineRide Mundial TV</h3>
+                            <p>Selecciona un canal para comenzar a transmitir en vivo.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="player-channel-info" id="player-channel-info" style="display: none;">
+                    <div class="channel-info-main">
+                        <img id="player-channel-icon" class="player-channel-icon" src="" alt="">
+                        <div class="channel-info-meta">
+                            <div class="live-tag">
+                                <span class="pulse-dot"></span>
+                                EN VIVO
+                            </div>
+                            <h2 id="player-channel-name">Nombre del canal</h2>
+                            <p id="player-channel-num">Num</p>
+                        </div>
+                        <button id="cinema-mode-btn" class="btn-cinema-mode" title="Modo Cine (Apagar Luces)">
+                            <svg class="cinema-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .6 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"></path>
+                                <line x1="9" y1="18" x2="15" y2="18"></line>
+                                <line x1="10" y1="22" x2="14" y2="22"></line>
+                            </svg>
+                            <span>Apagar Luces</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Channels Grid -->
+            <div class="channels-section">
+                <div class="section-title-row">
+                    <h2 id="current-category-title">Todos los Canales</h2>
+                    <span id="channel-count" class="count-badge">...</span>
+                </div>
+                <div id="channels-grid" class="channels-grid hide-scrollbar">
+                    <!-- Loaded dynamically -->
+                    <div class="grid-skeleton"></div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Settings/Credentials Modal -->
+    <div id="settings-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content card-gold-glow">
+            <div class="modal-header">
+                <h2>Conexión Servidor IPTV</h2>
+                <button id="close-modal-btn" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="settings-server">Servidor Xtream Codes URL</label>
+                    <input type="url" id="settings-server" placeholder="http://domain.com:8080">
+                </div>
+                <div class="form-group">
+                    <label for="settings-user">Usuario</label>
+                    <input type="text" id="settings-user" placeholder="Tu usuario">
+                </div>
+                <div class="form-group">
+                    <label for="settings-pass">Contraseña</label>
+                    <input type="password" id="settings-pass" placeholder="Tu contraseña">
+                </div>
+                <div id="modal-error" class="modal-error-msg" style="display: none;"></div>
+                <div id="modal-success" class="modal-success-msg" style="display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button id="test-connection-btn" class="btn-secondary">Probar Conexión</button>
+                <button id="save-settings-btn" class="btn-primary">Guardar y Recargar</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
