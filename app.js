@@ -138,10 +138,59 @@
         return btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     };
 
+    const decodeProxyTarget = (encoded) => {
+        let value = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        while (value.length % 4) value += '=';
+        return atob(value);
+    };
+
     const getProxyUrl = (targetUrl) => {
         const proxyBase = CLOUDFLARE_WORKER_URL ? CLOUDFLARE_WORKER_URL : '';
         const proxyPath = CLOUDFLARE_WORKER_URL ? '/' : '/api/proxy';
         return `${proxyBase}${proxyPath}?t=${encodeProxyTarget(targetUrl)}`;
+    };
+
+    const describeHlsUrl = (url) => {
+        if (!url) return { requestUrl: '', targetUrl: '' };
+        try {
+            const parsed = new URL(url, window.location.origin);
+            const target = parsed.searchParams.get('t');
+            return {
+                requestUrl: parsed.toString(),
+                targetUrl: target ? decodeProxyTarget(target) : '',
+            };
+        } catch (_) {
+            return { requestUrl: url, targetUrl: '' };
+        }
+    };
+
+    const logHlsError = (data, channelName) => {
+        const response = data.response || {};
+        const context = data.context || {};
+        const urlInfo = describeHlsUrl(context.url || response.url || data.url || '');
+        const payload = {
+            channel: channelName,
+            type: data.type,
+            details: data.details,
+            fatal: data.fatal,
+            status: response.code || response.status || null,
+            text: response.text || null,
+            requestUrl: urlInfo.requestUrl,
+            targetUrl: urlInfo.targetUrl,
+            loader: context.type || null,
+            level: context.level ?? null,
+            fragment: context.frag?.sn ?? null,
+            networkDetails: data.networkDetails ? {
+                status: data.networkDetails.status,
+                statusText: data.networkDetails.statusText,
+                responseURL: data.networkDetails.responseURL,
+            } : null,
+        };
+
+        console.groupCollapsed(`[HLS] ${data.details || data.type || 'error'}${data.fatal ? ' (fatal)' : ''}`);
+        console.table(payload);
+        console.log('HLS raw error:', data);
+        console.groupEnd();
     };
 
     const getAssetUrl = (url) => {
@@ -442,7 +491,16 @@
             const hls = new Hls({
                 maxMaxBufferLength: 15,
                 liveSyncDurationCount: 3,
-                enableWorker: true
+                enableWorker: true,
+                manifestLoadingTimeOut: 20000,
+                manifestLoadingMaxRetry: 4,
+                manifestLoadingRetryDelay: 1000,
+                levelLoadingTimeOut: 20000,
+                levelLoadingMaxRetry: 4,
+                levelLoadingRetryDelay: 1000,
+                fragLoadingTimeOut: 30000,
+                fragLoadingMaxRetry: 4,
+                fragLoadingRetryDelay: 1000,
             });
             hls.loadSource(streamUrl);
             hls.attachMedia(video);
@@ -451,14 +509,15 @@
                 video.play().catch(e => console.warn('Autoplay prevented', e));
             });
             hls.on(Hls.Events.ERROR, (event, data) => {
+                logHlsError(data, chan.name);
                 if (data.fatal) {
                     switch (data.type) {
                         case Hls.ErrorTypes.NETWORK_ERROR:
-                            console.warn('Network error, retrying...');
+                            console.warn('[HLS] Fatal network error. Retrying stream load. Check the grouped HLS log above for requestUrl, targetUrl, and status.');
                             hls.startLoad();
                              break;
                         case Hls.ErrorTypes.MEDIA_ERROR:
-                            console.warn('Media error, recovering...');
+                            console.warn('[HLS] Fatal media error. Trying media recovery. Check the grouped HLS log above for details.');
                             hls.recoverMediaError();
                             break;
                         default:
