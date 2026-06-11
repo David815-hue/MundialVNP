@@ -1,151 +1,147 @@
+import http from 'node:http';
+import https from 'node:https';
+
+/**
+ * Low-level HTTP GET that sends ALL headers we specify,
+ * including Content-Length: 0 which some IPTV servers require.
+ */
+function rawGet(targetUrl, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(targetUrl);
+        const mod = parsed.protocol === 'https:' ? https : http;
+
+        const req = mod.request({
+            method: 'GET',
+            hostname: parsed.hostname,
+            port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+            path: parsed.pathname + parsed.search,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Connection': 'keep-alive',
+                'Content-Length': '0',
+            },
+            timeout: timeoutMs,
+        }, (response) => {
+            // Follow redirects (301, 302, 307, 308)
+            if ([301, 302, 307, 308].includes(response.statusCode) && response.headers.location) {
+                rawGet(response.headers.location, timeoutMs).then(resolve).catch(reject);
+                return;
+            }
+
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(chunk));
+            response.on('end', () => {
+                resolve({
+                    ok: response.statusCode >= 200 && response.statusCode < 300,
+                    status: response.statusCode,
+                    headers: response.headers,
+                    body: Buffer.concat(chunks),
+                });
+            });
+            response.on('error', reject);
+        });
+
+        req.on('error', reject);
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Request timed out'));
+        });
+        req.end();
+    });
+}
+
 /**
  * Rewrites URLs inside an m3u8 playlist so that all segment/sub-playlist
- * URLs are routed through our Vercel proxy instead of hitting the IPTV
- * server directly (which would be blocked by Mixed Content policy).
+ * URLs are routed through our Vercel proxy.
  */
 function rewriteM3u8(content, encodedServer) {
-    const lines = content.split('\n');
     const proxyPrefix = `/api/proxy/s/${encodedServer}`;
 
-    const rewrittenLines = lines.map(line => {
-        const trimmed = line.trim();
+    return content.split('\n').map(line => {
+        const t = line.trim();
+        if (!t || t.startsWith('#')) return line;
 
-        // Skip empty lines and HLS tags
-        if (!trimmed || trimmed.startsWith('#')) return line;
-
-        // Absolute URL → encode that specific origin
-        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        if (t.startsWith('http://') || t.startsWith('https://')) {
             try {
-                const url = new URL(trimmed);
+                const url = new URL(t);
                 const enc = Buffer.from(url.origin).toString('base64').replace(/=+$/, '');
                 return `/api/proxy/s/${enc}${url.pathname}${url.search}`;
-            } catch (_) {
-                return line;
-            }
+            } catch (_) { return line; }
         }
 
-        // Root-relative path (e.g. /hlsr/…) → prepend proxy prefix
-        if (trimmed.startsWith('/')) {
-            return `${proxyPrefix}${trimmed}`;
-        }
+        if (t.startsWith('/')) return `${proxyPrefix}${t}`;
 
-        // Relative path → keep as-is; the browser will resolve it
-        // relative to the current proxy URL which already has the right base
         return line;
-    });
-
-    return rewrittenLines.join('\n');
+    }).join('\n');
 }
 
 export default async function handler(req, res) {
-    // ── CORS headers ───────────────────────────────────────────────
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers',
-        'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, ' +
-        'Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
-
     if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
     const urlPath = req.url || '';
 
-    // ── GENERIC STREAM PROXY ───────────────────────────────────────
-    // Pattern: /api/proxy/s/<BASE64_SERVER>/<any path on remote server>
-    const streamMatch = urlPath.match(/\/api\/proxy\/s\/([^\/]+)\/(.+)/);
+    // ── GENERIC STREAM PROXY: /api/proxy/s/<BASE64>/<path> ─────
+    const m = urlPath.match(/\/api\/proxy\/s\/([^\/]+)\/(.+)/);
 
-    if (streamMatch) {
-        const [, encodedServer, remotePath] = streamMatch;
+    if (m) {
+        const [, encodedServer, remotePath] = m;
         let server;
         try {
-            // Support base64 with or without trailing '='
             server = Buffer.from(encodedServer, 'base64').toString('utf-8');
         } catch (_) {
-            res.status(400).json({ error: 'Invalid server encoding' });
-            return;
+            return res.status(400).json({ error: 'Bad server encoding' });
         }
 
         const targetUrl = `${server}/${remotePath}`;
 
         try {
-            const ctrl = new AbortController();
-            const tid = setTimeout(() => ctrl.abort(), 15_000);
-
-            const upstream = await fetch(targetUrl, {
-                signal: ctrl.signal,
-                method: 'GET',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                    'Accept': '*/*',
-                    'Content-Length': '0',
-                },
-            });
-            clearTimeout(tid);
+            const upstream = await rawGet(targetUrl);
 
             if (!upstream.ok) {
-                res.status(upstream.status).end();
-                return;
+                return res.status(upstream.status).end();
             }
 
-            const ct = upstream.headers.get('content-type') || '';
+            const ct = upstream.headers['content-type'] || '';
             res.setHeader('Content-Type', ct || 'application/octet-stream');
 
             const isPlaylist =
                 remotePath.endsWith('.m3u8') ||
-                ct.includes('mpegurl') ||
-                ct.includes('x-mpegurl');
+                ct.includes('mpegurl');
 
             if (isPlaylist) {
-                const text = await upstream.text();
-                res.status(200).send(rewriteM3u8(text, encodedServer));
+                const text = upstream.body.toString('utf-8');
+                return res.status(200).send(rewriteM3u8(text, encodedServer));
             } else {
-                const cl = upstream.headers.get('content-length');
-                if (cl) res.setHeader('Content-Length', cl);
-                const buf = await upstream.arrayBuffer();
-                res.status(200).send(Buffer.from(buf));
+                if (upstream.headers['content-length']) {
+                    res.setHeader('Content-Length', upstream.headers['content-length']);
+                }
+                return res.status(200).send(upstream.body);
             }
         } catch (err) {
-            res.status(err.name === 'AbortError' ? 504 : 500)
-               .json({ error: err.message || 'Stream proxy error' });
+            return res.status(504).json({ error: err.message || 'Proxy error' });
         }
-        return;
     }
 
-    // ── IPTV API PROXY (player_api.php) ────────────────────────────
+    // ── IPTV API PROXY ─────────────────────────────────────────
     const { action, username, password, category_id, stream_id, server } = req.query;
+    const baseUrl = (server ? decodeURIComponent(server) : 'http://moontools.me:8080').replace(/\/+$/, '');
 
-    const defaultServer = 'http://moontools.me:8080';
-    const serverUrl = (server ? decodeURIComponent(server) : defaultServer).replace(/\/+$/, '');
-
-    let targetUrl =
-        `${serverUrl}/player_api.php` +
-        `?username=${encodeURIComponent(username || '')}` +
-        `&password=${encodeURIComponent(password || '')}`;
+    let targetUrl = `${baseUrl}/player_api.php?username=${encodeURIComponent(username || '')}&password=${encodeURIComponent(password || '')}`;
     if (action)      targetUrl += `&action=${encodeURIComponent(action)}`;
     if (category_id) targetUrl += `&category_id=${encodeURIComponent(category_id)}`;
     if (stream_id)   targetUrl += `&stream_id=${encodeURIComponent(stream_id)}`;
 
     try {
-        const ctrl = new AbortController();
-        const tid = setTimeout(() => ctrl.abort(), 12_000);
-
-        const upstream = await fetch(targetUrl, {
-            signal: ctrl.signal,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Content-Length': '0',
-            },
-        });
-        clearTimeout(tid);
-
+        const upstream = await rawGet(targetUrl, 12000);
         if (!upstream.ok) {
-            res.status(upstream.status).json({ error: `HTTP ${upstream.status}` });
-            return;
+            return res.status(upstream.status).json({ error: `HTTP ${upstream.status}` });
         }
-        res.status(200).json(await upstream.json());
+        return res.status(200).json(JSON.parse(upstream.body.toString('utf-8')));
     } catch (e) {
-        res.status(e.name === 'AbortError' ? 504 : 500)
-           .json({ error: e.message || 'Internal Server Error' });
+        return res.status(500).json({ error: e.message || 'Internal error' });
     }
 }
