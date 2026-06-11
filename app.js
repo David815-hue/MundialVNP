@@ -453,6 +453,17 @@
             }
         });
 
+        // Prime the video element to unlock playback with sound on mobile
+        // This runs synchronously in the click handler to satisfy browser gesture requirements
+        const primePromise = video.play();
+        if (primePromise !== undefined) {
+            primePromise.then(() => {
+                video.pause();
+            }).catch(() => {
+                // Ignore: it will fail because there is no source yet, but it successfully primes the element
+            });
+        }
+
         const creds = getCredentials();
         
         const isLocal = window.location.protocol === 'file:' || 
@@ -507,17 +518,12 @@
             hls.loadSource(streamUrl);
             window.hls = hls;
 
-            // Play immediately in the synchronous click context to satisfy mobile autoplay/sound policies
-            const playPromise = video.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(e => {
-                    console.warn('[HLS] Synchronous play() prevented/interrupted:', e);
-                    // Fallback: retry when manifest is parsed
-                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                        video.play().catch(err => console.error('[HLS] Autoplay backup failed:', err));
-                    });
-                });
-            }
+            // Once the manifest is parsed and HLS is ready, we start the playback.
+            // Since we primed the video element earlier in the click handler, the browser
+            // allows this asynchronous play() call to succeed.
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                video.play().catch(e => console.warn('[HLS] Autoplay prevented:', e));
+            });
 
             hls.on(Hls.Events.ERROR, (event, data) => {
                 logHlsError(data, chan.name);
@@ -539,9 +545,11 @@
                 }
             });
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            // Safari native support
+            // Safari native support (unlocked by the priming step above)
             video.src = streamUrl;
-            video.play().catch(e => console.warn('Safari native play prevented:', e));
+            video.addEventListener('loadedmetadata', () => {
+                video.play().catch(e => console.warn('Safari native play prevented:', e));
+            }, { once: true });
         } else {
             alert('Este navegador no soporta streaming HLS (.m3u8). Intenta con Google Chrome o Safari.');
         }
