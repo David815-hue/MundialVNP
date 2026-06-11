@@ -75,6 +75,13 @@
             <div class="player-container card-gold-glow">
                 <div class="video-wrapper">
                     <video id="video-player" controls autoplay playsinline></video>
+                    <!-- Loading Spinner Overlay -->
+                    <div id="player-loader" class="player-loader" style="display: none; opacity: 0;">
+                        <div class="loader-content">
+                            <img class="loader-spinning-logo" src="logo.png" alt="Cargando...">
+                            <p>Cargando transmisión...</p>
+                        </div>
+                    </div>
                     <div id="player-placeholder" class="player-placeholder">
                         <div class="placeholder-content">
                             <svg class="placeholder-iconPulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">

@@ -37,6 +37,10 @@
     const modalError = document.getElementById('modal-error');
     const modalSuccess = document.getElementById('modal-success');
     
+    // Player and Loader Elements
+    const video = document.getElementById('video-player');
+    const playerLoader = document.getElementById('player-loader');
+    
     // Cinema Mode Elements
     const cinemaModeBtn = document.getElementById('cinema-mode-btn');
     const cinemaCloseFloating = document.getElementById('cinema-close-floating');
@@ -363,8 +367,19 @@
 
         const creds = getCredentials();
         
-        // Stream format: http://domain:port/live/username/password/stream_id.m3u8
-        const streamUrl = `${creds.server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
+        const isLocal = window.location.protocol === 'file:' || 
+                        window.location.hostname === 'localhost' || 
+                        window.location.hostname === '127.0.0.1';
+
+        let streamUrl;
+        if (isLocal) {
+            // Stream format: http://domain:port/live/username/password/stream_id.m3u8
+            streamUrl = `${creds.server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
+        } else {
+            // Encode server to base64 to pass it safely in the path structure so that relative .ts chunks resolve through the proxy too
+            const base64Server = btoa(creds.server).replace(/=+$/, '');
+            streamUrl = `/api/proxy/live/${base64Server}/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
+        }
 
         // Hide placeholder and show info
         placeholder.style.opacity = '0';
@@ -541,6 +556,33 @@
             toggleCinemaMode();
         }
     });
+
+    // --- Player Loader Handlers ---
+    const showLoader = () => {
+        playerLoader.style.display = 'flex';
+        // Force reflow
+        playerLoader.offsetHeight;
+        playerLoader.style.opacity = '1';
+    };
+
+    const hideLoader = () => {
+        playerLoader.style.opacity = '0';
+        setTimeout(() => {
+            // Check opacity to prevent hiding if it started loading again
+            if (playerLoader.style.opacity === '0') {
+                playerLoader.style.display = 'none';
+            }
+        }, 300);
+    };
+
+    // Video Loading Events
+    video.addEventListener('loadstart', showLoader);
+    video.addEventListener('waiting', showLoader);
+    video.addEventListener('seeking', showLoader);
+    video.addEventListener('playing', hideLoader);
+    video.addEventListener('canplay', hideLoader);
+    video.addEventListener('pause', hideLoader);
+    video.addEventListener('error', hideLoader);
 
     // Start App
     initApp();

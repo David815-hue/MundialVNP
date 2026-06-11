@@ -10,9 +10,58 @@ export default async function handler(req, res) {
         return;
     }
 
+    // Check if it's a stream proxy request (e.g. /api/proxy/live/BASE64_SERVER/username/password/stream_id)
+    const urlPath = req.url || '';
+    const match = urlPath.match(/\/api\/proxy\/live\/([^\/]+)\/([^\/]+)\/([^\/]+)\/([^\/\?]+)/);
+    
+    if (match) {
+        const [_, encodedServer, username, password, filename] = match;
+        let server;
+        try {
+            server = Buffer.from(encodedServer, 'base64').toString('utf-8');
+        } catch (e) {
+            res.status(400).json({ error: 'Invalid server encoding' });
+            return;
+        }
+
+        const targetUrl = `${server}/live/${username}/${password}/${filename}`;
+
+        try {
+            const controller = new AbortController();
+            // 15 seconds timeout for streams
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+            const response = await fetch(targetUrl, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                res.status(response.status).end();
+                return;
+            }
+
+            // Set content type and length headers
+            res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
+            const contentLength = response.headers.get('content-length');
+            if (contentLength) {
+                res.setHeader('Content-Length', contentLength);
+            }
+
+            // Read the binary stream data and send it
+            const bodyBuffer = await response.arrayBuffer();
+            res.status(200).send(Buffer.from(bodyBuffer));
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                res.status(504).json({ error: 'Stream fetch timed out' });
+            } else {
+                res.status(500).json({ error: err.message || 'Stream fetch error' });
+            }
+        }
+        return;
+    }
+
+    // Existing API proxy logic for player_api.php
     const { action, username, password, category_id, stream_id, server } = req.query;
 
-    // Use default server if none provided in parameters
     const defaultServerUrl = 'http://moontools.me:8080';
     const serverUrl = (server ? decodeURIComponent(server) : defaultServerUrl).replace(/\/+$/, '');
 
@@ -24,7 +73,7 @@ export default async function handler(req, res) {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000); // 12 seconds timeout
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
 
         const response = await fetch(targetUrl, { signal: controller.signal });
         clearTimeout(timeoutId);
