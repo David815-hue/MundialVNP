@@ -1,11 +1,10 @@
 /**
- * Cloudflare Pages Advanced Worker – IPTV HLS Stream & API Proxy
- * 
- * Named `_worker.js` at the root of the project to automatically intercept
- * all requests on the Cloudflare Pages domain and act as the HLS proxy.
+ * Cloudflare Pages Worker - IPTV HLS Stream & API Proxy
+ *
+ * Named `_worker.js` at the root of the project to intercept requests on a
+ * Cloudflare Pages deployment and act as the HLS proxy.
  */
 
-// URL-safe Base64 encoding/decoding helpers
 function encodeTarget(url) {
     return btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -16,29 +15,37 @@ function decodeTarget(encoded) {
     return atob(s);
 }
 
-// Rewrite m3u8 playlist URLs to route through this worker
-function rewriteM3u8(text, serverOrigin, workerOrigin) {
+function proxyUrlFor(url, workerOrigin) {
+    return `${workerOrigin}/?t=${encodeTarget(url)}`;
+}
+
+function rewriteM3u8(text, playlistUrl, workerOrigin) {
     return text.split('\n').map(line => {
         const t = line.trim();
-        if (!t || t.startsWith('#')) return line;
+        if (!t) return line;
 
-        let fullUrl;
-        if (t.startsWith('http://') || t.startsWith('https://')) {
-            fullUrl = t;
-        } else if (t.startsWith('/')) {
-            fullUrl = serverOrigin + t;
-        } else {
-            // Relative path – resolve using target origin
-            fullUrl = serverOrigin + '/' + t;
+        if (t.startsWith('#')) {
+            return line.replace(/URI="([^"]+)"/g, (match, uri) => {
+                try {
+                    return `URI="${proxyUrlFor(new URL(uri, playlistUrl).toString(), workerOrigin)}"`;
+                } catch (_) {
+                    return match;
+                }
+            });
         }
 
-        return `${workerOrigin}/?t=${encodeTarget(fullUrl)}`;
+        try {
+            return proxyUrlFor(new URL(t, playlistUrl).toString(), workerOrigin);
+        } catch (_) {
+            return line;
+        }
     }).join('\n');
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const MAX_REDIRECTS = 5;
 
-function corsHeaders(request) {
+function corsHeaders() {
     return {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -47,90 +54,98 @@ function corsHeaders(request) {
     };
 }
 
+async function fetchUpstream(targetUrl, redirectsLeft = MAX_REDIRECTS) {
+    const parsedUrl = new URL(targetUrl);
+    const resp = await fetch(parsedUrl.toString(), {
+        method: 'GET',
+        headers: {
+            'User-Agent': UA,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': parsedUrl.origin + '/',
+            'Origin': parsedUrl.origin,
+        },
+        redirect: 'manual',
+    });
+
+    const location = resp.headers.get('location');
+    if ([301, 302, 303, 307, 308].includes(resp.status) && location && redirectsLeft > 0) {
+        return fetchUpstream(new URL(location, parsedUrl).toString(), redirectsLeft - 1);
+    }
+
+    return { resp, finalUrl: parsedUrl.toString() };
+}
+
 export default {
-    async fetch(request, env, ctx) {
+    async fetch(request) {
         const url = new URL(request.url);
         const workerOrigin = url.origin;
 
-        // Handle CORS preflight (OPTIONS)
         if (request.method === 'OPTIONS') {
             return new Response(null, {
                 status: 200,
-                headers: corsHeaders(request)
+                headers: corsHeaders(),
             });
         }
 
         const t = url.searchParams.get('t');
 
-        // ── 1. STREAM & PLAYLIST PROXY (?t=BASE64_URL) ──
         if (t) {
             let targetUrl;
             try {
                 targetUrl = decodeTarget(t);
+                new URL(targetUrl);
             } catch (_) {
-                return new Response('Bad target encoding', { status: 400, headers: corsHeaders(request) });
-            }
-
-            let targetOrigin;
-            try {
-                const u = new URL(targetUrl);
-                targetOrigin = u.origin;
-            } catch (_) {
-                return new Response('Invalid target URL', { status: 400, headers: corsHeaders(request) });
+                return new Response('Invalid target URL', { status: 400, headers: corsHeaders() });
             }
 
             try {
-                // Fetch from upstream server
-                const resp = await fetch(targetUrl, {
-                    method: 'GET',
-                    headers: {
-                        'User-Agent': UA,
-                        'Accept': '*/*',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Referer': targetOrigin + '/',
-                        'Origin': targetOrigin,
-                    },
-                    redirect: 'follow',
-                });
-
-                // Read Content-Type header
+                const { resp, finalUrl } = await fetchUpstream(targetUrl);
                 const contentType = resp.headers.get('content-type') || '';
-                const isPlaylist = targetUrl.endsWith('.m3u8') || 
-                                   contentType.includes('mpegurl') || 
-                                   contentType.includes('application/x-mpegURL');
+                const normalizedContentType = contentType.toLowerCase();
+                const finalPath = new URL(finalUrl).pathname.toLowerCase();
+                const targetPath = new URL(targetUrl).pathname.toLowerCase();
+                const isPlaylist = finalPath.endsWith('.m3u8') ||
+                    targetPath.endsWith('.m3u8') ||
+                    normalizedContentType.includes('mpegurl') ||
+                    normalizedContentType.includes('application/x-mpegurl');
 
                 if (isPlaylist) {
                     const text = await resp.text();
-                    const rewrittenText = rewriteM3u8(text, targetOrigin, workerOrigin);
-                    
-                    return new Response(rewrittenText, {
+                    return new Response(rewriteM3u8(text, finalUrl, workerOrigin), {
                         status: 200,
                         headers: {
-                            ...corsHeaders(request),
+                            ...corsHeaders(),
                             'Content-Type': 'application/vnd.apple.mpegurl',
-                        }
+                            'Cache-Control': 'no-store',
+                        },
                     });
                 }
 
-                // For video segments (.ts, etc.), stream response back
+                const headers = {
+                    ...corsHeaders(),
+                    'Content-Type': contentType || 'application/octet-stream',
+                    'Cache-Control': 'public, max-age=86400',
+                };
+                const contentLength = resp.headers.get('content-length');
+                if (contentLength) headers['Content-Length'] = contentLength;
+
                 return new Response(resp.body, {
                     status: resp.status,
                     statusText: resp.statusText,
-                    headers: {
-                        ...corsHeaders(request),
-                        'Content-Type': contentType || 'application/octet-stream',
-                        'Cache-Control': 'public, max-age=86400',
-                    }
+                    headers,
                 });
             } catch (err) {
-                return new Response(`Proxy error: ${err.message}`, { status: 502, headers: corsHeaders(request) });
+                return new Response(`Proxy error: ${err.message}`, {
+                    status: 502,
+                    headers: corsHeaders(),
+                });
             }
         }
 
-        // ── 2. IPTV PLAYER API PROXY (for player_api.php) ──
         const action = url.searchParams.get('action');
         const username = url.searchParams.get('username');
-        
+
         if (username || action) {
             const password = url.searchParams.get('password') || '';
             const category_id = url.searchParams.get('category_id');
@@ -138,7 +153,7 @@ export default {
             const serverParam = url.searchParams.get('server');
 
             const baseUrl = (serverParam ? decodeURIComponent(serverParam) : 'http://moontools.me:8080').replace(/\/+$/, '');
-            let target = `${baseUrl}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+            let target = `${baseUrl}/player_api.php?username=${encodeURIComponent(username || '')}&password=${encodeURIComponent(password)}`;
             if (action) target += `&action=${encodeURIComponent(action)}`;
             if (category_id) target += `&category_id=${encodeURIComponent(category_id)}`;
             if (stream_id) target += `&stream_id=${encodeURIComponent(stream_id)}`;
@@ -158,28 +173,27 @@ export default {
                 return new Response(JSON.stringify(json), {
                     status: 200,
                     headers: {
-                        ...corsHeaders(request),
-                        'Content-Type': 'application/json'
-                    }
+                        ...corsHeaders(),
+                        'Content-Type': 'application/json',
+                    },
                 });
             } catch (err) {
                 return new Response(JSON.stringify({ error: err.message }), {
                     status: 500,
                     headers: {
-                        ...corsHeaders(request),
-                        'Content-Type': 'application/json'
-                    }
+                        ...corsHeaders(),
+                        'Content-Type': 'application/json',
+                    },
                 });
             }
         }
 
-        // ── 3. Fallback / Default response ──
         return new Response('IPTV HLS Proxy Worker is running. Ready for stream requests.', {
             status: 200,
             headers: {
-                ...corsHeaders(request),
-                'Content-Type': 'text/plain'
-            }
+                ...corsHeaders(),
+                'Content-Type': 'text/plain',
+            },
         });
-    }
+    },
 };

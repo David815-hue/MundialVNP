@@ -13,26 +13,36 @@ function decodeTarget(encoded) {
     return Buffer.from(s, 'base64').toString('utf-8');
 }
 
+function proxyUrlFor(url) {
+    return `/api/proxy?t=${encodeTarget(url)}`;
+}
+
 // Rewrite m3u8 playlist URLs to pass back through the proxy
-function rewriteM3u8(text, serverOrigin) {
+function rewriteM3u8(text, playlistUrl) {
     return text.split('\n').map(line => {
         const t = line.trim();
-        if (!t || t.startsWith('#')) return line;
+        if (!t) return line;
 
-        let fullUrl;
-        if (t.startsWith('http://') || t.startsWith('https://')) {
-            fullUrl = t;
-        } else if (t.startsWith('/')) {
-            fullUrl = serverOrigin + t;
-        } else {
-            fullUrl = serverOrigin + '/' + t;
+        if (t.startsWith('#')) {
+            return line.replace(/URI="([^"]+)"/g, (match, uri) => {
+                try {
+                    return `URI="${proxyUrlFor(new URL(uri, playlistUrl).toString())}"`;
+                } catch (_) {
+                    return match;
+                }
+            });
         }
 
-        return `/api/proxy?t=${encodeTarget(fullUrl)}`;
+        try {
+            return proxyUrlFor(new URL(t, playlistUrl).toString());
+        } catch (_) {
+            return line;
+        }
     }).join('\n');
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const MAX_REDIRECTS = 5;
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -40,6 +50,44 @@ const corsHeaders = {
     'Access-Control-Allow-Headers': '*',
     'Access-Control-Max-Age': '86400',
 };
+
+function requestTarget(targetUrl, redirectsLeft, onResponse, onError) {
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(targetUrl);
+    } catch (err) {
+        onError(err);
+        return;
+    }
+
+    const client = parsedUrl.protocol === 'https:' ? https : http;
+
+    const targetReq = client.request(parsedUrl, {
+        method: 'GET',
+        headers: {
+            'User-Agent': UA,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': parsedUrl.origin + '/',
+            'Origin': parsedUrl.origin,
+            'Content-Length': '0',
+        }
+    }, (targetRes) => {
+        const status = targetRes.statusCode || 200;
+        const location = targetRes.headers.location;
+
+        if ([301, 302, 303, 307, 308].includes(status) && location && redirectsLeft > 0) {
+            targetRes.resume();
+            requestTarget(new URL(location, parsedUrl).toString(), redirectsLeft - 1, onResponse, onError);
+            return;
+        }
+
+        onResponse(targetRes, parsedUrl.toString());
+    });
+
+    targetReq.on('error', onError);
+    targetReq.end();
+}
 
 export default function handler(req, res) {
     // Handle OPTIONS request for CORS preflight
@@ -66,36 +114,24 @@ export default function handler(req, res) {
             return;
         }
 
-        let targetOrigin;
-        let isHttps = false;
         try {
-            const u = new URL(targetUrl);
-            targetOrigin = u.origin;
-            isHttps = u.protocol === 'https:';
+            new URL(targetUrl);
         } catch (_) {
             res.writeHead(400, { ...corsHeaders, 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid target URL' }));
             return;
         }
 
-        const client = isHttps ? https : http;
-
-        const targetReq = client.request(targetUrl, {
-            method: 'GET',
-            headers: {
-                'User-Agent': UA,
-                'Accept': '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': targetOrigin + '/',
-                'Origin': targetOrigin,
-                'Content-Length': '0', // Force Content-Length: 0 on TCP socket to satisfy strict Nginx servers (fix 411)
-            }
-        }, (targetRes) => {
+        requestTarget(targetUrl, MAX_REDIRECTS, (targetRes, finalUrl) => {
             const status = targetRes.statusCode || 200;
             const ct = targetRes.headers['content-type'] || '';
-            const isPlaylist = targetUrl.endsWith('.m3u8') || 
-                               ct.includes('mpegurl') || 
-                               ct.includes('application/x-mpegURL');
+            const contentType = String(ct).toLowerCase();
+            const finalPath = new URL(finalUrl).pathname.toLowerCase();
+            const targetPath = new URL(targetUrl).pathname.toLowerCase();
+            const isPlaylist = finalPath.endsWith('.m3u8') ||
+                               targetPath.endsWith('.m3u8') ||
+                               contentType.includes('mpegurl') ||
+                               contentType.includes('application/x-mpegurl');
 
             if (isPlaylist) {
                 let data = '';
@@ -103,30 +139,31 @@ export default function handler(req, res) {
                     data += chunk;
                 });
                 targetRes.on('end', () => {
-                    const rewritten = rewriteM3u8(data, targetOrigin);
+                    const rewritten = rewriteM3u8(data, finalUrl);
                     res.writeHead(200, {
                         ...corsHeaders,
                         'Content-Type': 'application/vnd.apple.mpegurl',
+                        'Cache-Control': 'no-store',
                     });
                     res.end(rewritten);
                 });
             } else {
                 // Stream binary video segments (.ts) directly to client
-                res.writeHead(status, {
+                const headers = {
                     ...corsHeaders,
                     'Content-Type': ct || 'application/octet-stream',
                     'Cache-Control': 'public, max-age=86400',
-                });
+                };
+                if (targetRes.headers['content-length']) {
+                    headers['Content-Length'] = targetRes.headers['content-length'];
+                }
+                res.writeHead(status, headers);
                 targetRes.pipe(res);
             }
-        });
-
-        targetReq.on('error', (err) => {
+        }, (err) => {
             res.writeHead(502, { ...corsHeaders, 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message, target: targetUrl }));
         });
-
-        targetReq.end();
         return;
     }
 
