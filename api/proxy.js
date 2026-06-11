@@ -43,8 +43,8 @@ function rewriteM3u8(text, playlistUrl) {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const MAX_REDIRECTS = 5;
-const PLAYLIST_RETRIES = 3;
-const UPSTREAM_TIMEOUT_MS = 25000;
+const PLAYLIST_RETRIES = 2;
+const UPSTREAM_TIMEOUT_MS = 4000;
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -53,7 +53,7 @@ const corsHeaders = {
     'Access-Control-Max-Age': '86400',
 };
 
-function requestTarget(targetUrl, redirectsLeft, onResponse, onError) {
+function requestTarget(targetUrl, redirectsLeft, onResponse, onError, timeoutMs = 6000) {
     let parsedUrl;
     try {
         parsedUrl = new URL(targetUrl);
@@ -63,6 +63,7 @@ function requestTarget(targetUrl, redirectsLeft, onResponse, onError) {
     }
 
     const client = parsedUrl.protocol === 'https:' ? https : http;
+    let completed = false;
 
     const targetReq = client.request(parsedUrl, {
         method: 'GET',
@@ -75,29 +76,51 @@ function requestTarget(targetUrl, redirectsLeft, onResponse, onError) {
             'Content-Length': '0',
         }
     }, (targetRes) => {
+        if (completed) return;
         const status = targetRes.statusCode || 200;
         const location = targetRes.headers.location;
 
         if ([301, 302, 303, 307, 308].includes(status) && location && redirectsLeft > 0) {
+            completed = true;
             targetRes.resume();
-            requestTarget(new URL(location, parsedUrl).toString(), redirectsLeft - 1, onResponse, onError);
+            requestTarget(new URL(location, parsedUrl).toString(), redirectsLeft - 1, onResponse, onError, timeoutMs);
             return;
         }
 
+        completed = true;
         onResponse(targetRes, parsedUrl.toString());
     });
 
-    targetReq.on('error', onError);
+    targetReq.on('error', (err) => {
+        if (completed) return;
+        completed = true;
+        onError(err);
+    });
+
+    targetReq.setTimeout(timeoutMs, () => {
+        if (completed) return;
+        completed = true;
+        targetReq.destroy(new Error('Connection timed out to IPTV server'));
+        onError(new Error('Timeout'));
+    });
+
     targetReq.end();
 }
 
-async function fetchUpstream(targetUrl, timeoutMs = UPSTREAM_TIMEOUT_MS) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+function fetchUpstreamWithRedirects(targetUrl, redirectsLeft = MAX_REDIRECTS, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(targetUrl);
+        } catch (err) {
+            reject(err);
+            return;
+        }
 
-    try {
-        const parsedUrl = new URL(targetUrl);
-        const response = await fetch(parsedUrl.toString(), {
+        const client = parsedUrl.protocol === 'https:' ? https : http;
+        let completed = false;
+
+        const targetReq = client.request(parsedUrl, {
             method: 'GET',
             headers: {
                 'User-Agent': UA,
@@ -105,33 +128,82 @@ async function fetchUpstream(targetUrl, timeoutMs = UPSTREAM_TIMEOUT_MS) {
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Referer': parsedUrl.origin + '/',
                 'Origin': parsedUrl.origin,
-            },
-            redirect: 'follow',
-            signal: controller.signal,
+                'Content-Length': '0', // Force Content-Length: 0 on TCP socket to satisfy strict Nginx servers (fix 411)
+            }
+        }, (targetRes) => {
+            if (completed) return;
+            const status = targetRes.statusCode || 200;
+            const location = targetRes.headers.location;
+
+            if ([301, 302, 303, 307, 308].includes(status) && location && redirectsLeft > 0) {
+                completed = true;
+                targetRes.resume();
+                fetchUpstreamWithRedirects(new URL(location, parsedUrl).toString(), redirectsLeft - 1, timeoutMs)
+                    .then(resolve)
+                    .catch(reject);
+                return;
+            }
+
+            completed = true;
+            resolve({ res: targetRes, finalUrl: parsedUrl.toString() });
         });
 
-        return response;
-    } finally {
-        clearTimeout(timeout);
-    }
+        targetReq.on('error', (err) => {
+            if (completed) return;
+            completed = true;
+            reject(err);
+        });
+
+        targetReq.setTimeout(timeoutMs, () => {
+            if (completed) return;
+            completed = true;
+            targetReq.destroy(new Error('Connection timed out to IPTV server'));
+            reject(new Error('Timeout'));
+        });
+
+        targetReq.end();
+    });
 }
 
 async function fetchPlaylistWithRetry(targetUrl) {
     let lastResult = null;
 
     for (let attempt = 1; attempt <= PLAYLIST_RETRIES; attempt += 1) {
-        const response = await fetchUpstream(targetUrl);
-        const text = await response.text();
-        lastResult = {
-            attempt,
-            status: response.status,
-            finalUrl: response.url || targetUrl,
-            text,
-            contentType: response.headers.get('content-type') || '',
-        };
+        try {
+            const { res: response, finalUrl } = await fetchUpstreamWithRedirects(targetUrl);
+            
+            const text = await new Promise((resolve, reject) => {
+                let body = '';
+                response.on('data', chunk => {
+                    body += chunk;
+                });
+                response.on('end', () => {
+                    resolve(body);
+                });
+                response.on('error', err => {
+                    reject(err);
+                });
+            });
 
-        if (response.ok && text.trimStart().startsWith('#EXTM3U')) {
-            return lastResult;
+            lastResult = {
+                attempt,
+                status: response.statusCode || 200,
+                finalUrl,
+                text,
+                contentType: response.headers['content-type'] || '',
+            };
+
+            if (lastResult.status === 200 && text.trimStart().startsWith('#EXTM3U')) {
+                return lastResult;
+            }
+        } catch (err) {
+            lastResult = {
+                attempt,
+                status: 500,
+                finalUrl: targetUrl,
+                text: err.message,
+                contentType: 'text/plain',
+            };
         }
     }
 
