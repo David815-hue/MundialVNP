@@ -503,12 +503,22 @@
                 fragLoadingMaxRetry: 4,
                 fragLoadingRetryDelay: 1000,
             });
-            hls.loadSource(streamUrl);
             hls.attachMedia(video);
+            hls.loadSource(streamUrl);
             window.hls = hls;
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                video.play().catch(e => console.warn('Autoplay prevented', e));
-            });
+
+            // Play immediately in the synchronous click context to satisfy mobile autoplay/sound policies
+            const playPromise = video.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(e => {
+                    console.warn('[HLS] Synchronous play() prevented/interrupted:', e);
+                    // Fallback: retry when manifest is parsed
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        video.play().catch(err => console.error('[HLS] Autoplay backup failed:', err));
+                    });
+                });
+            }
+
             hls.on(Hls.Events.ERROR, (event, data) => {
                 logHlsError(data, chan.name);
                 if (data.fatal) {
@@ -531,9 +541,7 @@
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
             // Safari native support
             video.src = streamUrl;
-            video.addEventListener('loadedmetadata', () => {
-                video.play();
-            });
+            video.play().catch(e => console.warn('Safari native play prevented:', e));
         } else {
             alert('Este navegador no soporta streaming HLS (.m3u8). Intenta con Google Chrome o Safari.');
         }
