@@ -128,6 +128,35 @@
         }
     };
 
+    const isLocalEnvironment = () => {
+        return window.location.protocol === 'file:' ||
+               window.location.hostname === 'localhost' ||
+               window.location.hostname === '127.0.0.1';
+    };
+
+    const encodeProxyTarget = (url) => {
+        return btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    };
+
+    const getProxyUrl = (targetUrl) => {
+        const proxyBase = CLOUDFLARE_WORKER_URL ? CLOUDFLARE_WORKER_URL : '';
+        const proxyPath = CLOUDFLARE_WORKER_URL ? '/' : '/api/proxy';
+        return `${proxyBase}${proxyPath}?t=${encodeProxyTarget(targetUrl)}`;
+    };
+
+    const getAssetUrl = (url) => {
+        if (!url || isLocalEnvironment()) return url || '';
+        try {
+            const parsed = new URL(url);
+            if (parsed.protocol === 'http:') {
+                return getProxyUrl(parsed.toString());
+            }
+            return parsed.toString();
+        } catch (_) {
+            return url;
+        }
+    };
+
     // Fetch API Data
     const fetchApi = async (url) => {
         const response = await fetch(url);
@@ -313,11 +342,12 @@
             const isFav = isFavorite(chan.stream_id);
             const activeClass = window.activeStreamId === String(chan.stream_id) ? 'active' : '';
             const fallbackImg = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40"><rect fill="#0a160e" width="40" height="40"/><text fill="#e5a00d" font-family="Arial,sans-serif" font-size="10" text-anchor="middle" x="20" y="24">TV</text></svg>');
+            const logoUrl = getAssetUrl(chan.stream_icon) || fallbackImg;
             
             html += `
                 <div class="channel-card ${activeClass}" data-stream-id="${chan.stream_id}">
                     <div class="channel-card-logo-wrap">
-                        <img class="channel-card-logo" src="${chan.stream_icon || fallbackImg}" alt="" onerror="this.src='${fallbackImg}'">
+                        <img class="channel-card-logo" src="${logoUrl}" alt="" onerror="this.src='${fallbackImg}'">
                         <span class="channel-card-num">#${chan.num || chan.stream_id}</span>
                     </div>
                     <span class="channel-card-name" title="${chan.name}">${chan.name}</span>
@@ -402,7 +432,7 @@
         infoPanel.style.display = 'block';
         document.getElementById('player-channel-name').textContent = chan.name;
         document.getElementById('player-channel-num').textContent = `Canal #${chan.num || chan.stream_id}`;
-        document.getElementById('player-channel-icon').src = chan.stream_icon || '';
+        document.getElementById('player-channel-icon').src = getAssetUrl(chan.stream_icon);
 
         // Initialize hls.js or Native Player
         if (Hls.isSupported()) {
