@@ -1,3 +1,38 @@
+function rewriteM3u8(content, encodedServer, username, password) {
+    const lines = content.split('\n');
+    const base64Prefix = `/api/proxy/live/${encodedServer}/${username}/${password}`;
+    
+    const rewrittenLines = lines.map(line => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) {
+            return line;
+        }
+        
+        // If it's an absolute URL
+        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+            try {
+                const url = new URL(trimmed);
+                const host = url.origin;
+                const path = url.pathname + url.search;
+                const newEncodedServer = Buffer.from(host).toString('base64').replace(/=+$/, '');
+                return `/api/proxy/live/${newEncodedServer}/${username}/${password}${path}`;
+            } catch (e) {
+                return line;
+            }
+        }
+        
+        // If it's a root-relative path (starts with /)
+        if (trimmed.startsWith('/')) {
+            return `${base64Prefix}${trimmed}`;
+        }
+        
+        // If it's a relative path, let the browser resolve it naturally
+        return line;
+    });
+    
+    return rewrittenLines.join('\n');
+}
+
 export default async function handler(req, res) {
     // Enable CORS for Vercel
     res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -10,9 +45,9 @@ export default async function handler(req, res) {
         return;
     }
 
-    // Check if it's a stream proxy request (e.g. /api/proxy/live/BASE64_SERVER/username/password/stream_id)
+    // Check if it's a stream proxy request (e.g. /api/proxy/live/BASE64_SERVER/username/password/stream_path)
     const urlPath = req.url || '';
-    const match = urlPath.match(/\/api\/proxy\/live\/([^\/]+)\/([^\/]+)\/([^\/]+)\/([^\/\?]+)/);
+    const match = urlPath.match(/\/api\/proxy\/live\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.+)/);
     
     if (match) {
         const [_, encodedServer, username, password, filename] = match;
@@ -28,8 +63,7 @@ export default async function handler(req, res) {
 
         try {
             const controller = new AbortController();
-            // 15 seconds timeout for streams
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
 
             const response = await fetch(targetUrl, { signal: controller.signal });
             clearTimeout(timeoutId);
@@ -39,16 +73,27 @@ export default async function handler(req, res) {
                 return;
             }
 
-            // Set content type and length headers
-            res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
-            const contentLength = response.headers.get('content-length');
-            if (contentLength) {
-                res.setHeader('Content-Length', contentLength);
-            }
+            const contentType = response.headers.get('content-type') || '';
+            res.setHeader('Content-Type', contentType || 'application/octet-stream');
 
-            // Read the binary stream data and send it
-            const bodyBuffer = await response.arrayBuffer();
-            res.status(200).send(Buffer.from(bodyBuffer));
+            const isPlaylist = filename.endsWith('.m3u8') || 
+                               contentType.includes('mpegurl') || 
+                               contentType.includes('x-mpegurl');
+
+            if (isPlaylist) {
+                // Read as text, rewrite URLs inside playlist to go through proxy
+                const playlistText = await response.text();
+                const rewritten = rewriteM3u8(playlistText, encodedServer, username, password);
+                res.status(200).send(rewritten);
+            } else {
+                // Pipe binary data (e.g. TS segments)
+                const contentLength = response.headers.get('content-length');
+                if (contentLength) {
+                    res.setHeader('Content-Length', contentLength);
+                }
+                const bodyBuffer = await response.arrayBuffer();
+                res.status(200).send(Buffer.from(bodyBuffer));
+            }
         } catch (err) {
             if (err.name === 'AbortError') {
                 res.status(504).json({ error: 'Stream fetch timed out' });
