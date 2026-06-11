@@ -909,24 +909,31 @@ body {
 
 /* Specific Smartphone Portrait split-screen optimization */
 @media (max-width: 580px) and (orientation: portrait) {
-    .video-wrapper {
+    .player-container {
         position: fixed;
         top: 64px;
         left: 0;
         width: 100%;
         height: 28vh;
         z-index: 80;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+        border-radius: 0;
+        border: none;
         border-bottom: var(--border-gold-glass);
+        box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+        background: #000;
+    }
+
+    .video-wrapper {
+        position: relative;
+        height: 100%;
+        width: 100%;
+        aspect-ratio: auto;
     }
     
     .player-placeholder {
-        position: fixed;
-        top: 64px;
-        left: 0;
-        width: 100%;
-        height: 28vh;
-        z-index: 85;
+        position: absolute;
+        inset: 0;
+        z-index: 5;
     }
     
     .player-channel-info {
