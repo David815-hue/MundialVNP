@@ -4,6 +4,11 @@
    ========================================================================== */
 
    document.addEventListener('DOMContentLoaded', () => {
+    // OPCIONAL: Si deseas usar Cloudflare Workers como Proxy de streaming e IPTV para evitar el error 411/CORS,
+    // coloca la URL de tu Worker aquí (ejemplo: 'https://tu-worker.tu-usuario.workers.dev').
+    // Si la dejas vacía '', el sitio web usará automáticamente el proxy serverless de Vercel (/api/proxy).
+    const CLOUDFLARE_WORKER_URL = '';
+
     // Default IPTV Server Credentials (MoonTools)
     const DEFAULT_SERVER = 'http://moontools.me:8080';
     const DEFAULT_USER = 'chrisquint';
@@ -110,8 +115,11 @@
             }
             return url;
         } else {
-            // Deployed environment: Route through Vercel Serverless Function Proxy
-            let url = `/api/proxy?username=${userParam}&password=${passParam}&server=${serverParam}`;
+            // Deployed environment: Route through Vercel or Cloudflare Worker Proxy
+            const proxyBase = CLOUDFLARE_WORKER_URL ? CLOUDFLARE_WORKER_URL : '';
+            const proxyPath = CLOUDFLARE_WORKER_URL ? '/' : '/api/proxy';
+            
+            let url = `${proxyBase}${proxyPath}?username=${userParam}&password=${passParam}&server=${serverParam}`;
             if (action) url += `&action=${action}`;
             for (const [key, val] of Object.entries(params)) {
                 url += `&${key}=${encodeURIComponent(val)}`;
@@ -379,7 +387,10 @@
             // Encode full stream URL as base64 and pass via query param
             const fullStreamUrl = `${creds.server}/live/${encodeURIComponent(creds.username)}/${encodeURIComponent(creds.password)}/${chan.stream_id}.m3u8`;
             const b64 = btoa(fullStreamUrl).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-            streamUrl = `/api/proxy?t=${b64}`;
+            
+            const proxyBase = CLOUDFLARE_WORKER_URL ? CLOUDFLARE_WORKER_URL : '';
+            const proxyPath = CLOUDFLARE_WORKER_URL ? '/' : '/api/proxy';
+            streamUrl = `${proxyBase}${proxyPath}?t=${b64}`;
         }
 
         // Hide placeholder and show info
@@ -496,7 +507,9 @@
         if (isLocal) {
             testUrl = `${serverVal}/player_api.php?username=${encodeURIComponent(userVal)}&password=${encodeURIComponent(passVal)}`;
         } else {
-            testUrl = `/api/proxy?username=${encodeURIComponent(userVal)}&password=${encodeURIComponent(passVal)}&server=${encodeURIComponent(serverVal)}`;
+            const proxyBase = CLOUDFLARE_WORKER_URL ? CLOUDFLARE_WORKER_URL : '';
+            const proxyPath = CLOUDFLARE_WORKER_URL ? '/' : '/api/proxy';
+            testUrl = `${proxyBase}${proxyPath}?username=${encodeURIComponent(userVal)}&password=${encodeURIComponent(passVal)}&server=${encodeURIComponent(serverVal)}`;
         }
 
         try {
