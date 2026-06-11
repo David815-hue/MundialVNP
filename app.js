@@ -453,6 +453,9 @@
             }
         });
 
+        // Reset hasPlayed state for the new channel loading
+        video.dataset.hasPlayed = 'false';
+
         // Prime the video element to unlock playback with sound on mobile
         // This runs synchronously in the click handler to satisfy browser gesture requirements
         const primePromise = video.play();
@@ -679,6 +682,11 @@
 
     // --- Player Loader Handlers ---
     const showLoader = () => {
+        if (video.dataset.hasPlayed === 'true') {
+            playerLoader.classList.add('buffering');
+        } else {
+            playerLoader.classList.remove('buffering');
+        }
         playerLoader.style.display = 'flex';
         // Force reflow
         playerLoader.offsetHeight;
@@ -699,7 +707,10 @@
     video.addEventListener('loadstart', showLoader);
     video.addEventListener('waiting', showLoader);
     video.addEventListener('seeking', showLoader);
-    video.addEventListener('playing', hideLoader);
+    video.addEventListener('playing', () => {
+        video.dataset.hasPlayed = 'true';
+        hideLoader();
+    });
     video.addEventListener('canplay', hideLoader);
     video.addEventListener('pause', hideLoader);
     video.addEventListener('error', hideLoader);
