@@ -7,7 +7,7 @@
     // OPCIONAL: Si deseas usar Cloudflare Workers como Proxy de streaming e IPTV para evitar el error 411/CORS,
     // coloca la URL de tu Worker aquí (ejemplo: 'https://tu-worker.tu-usuario.workers.dev').
     // Si la dejas vacía '', el sitio web usará automáticamente el proxy serverless de Vercel (/api/proxy).
-    const CLOUDFLARE_WORKER_URL = 'https://mundialvnp.gem966008.workers.dev';
+    const CLOUDFLARE_WORKER_URL = '';
 
     // Default IPTV Server Credentials (MoonTools)
     const DEFAULT_SERVER = 'http://moontools.me:8080';
